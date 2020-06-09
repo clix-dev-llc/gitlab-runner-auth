@@ -20,6 +20,7 @@ import socket
 import argparse
 import json
 import urllib.request
+from shutil import which
 from string import Formatter
 from urllib.request import Request
 from urllib.parse import urlencode, urljoin
@@ -44,15 +45,6 @@ def generate_tags(runner_type=""):
     # also tag with the generic cluster name by removing any trailing numbers
     tags = [hostname, re.sub(r'\d', '', hostname)]
     if runner_type == "batch":
-        def which(cmd):
-            all_paths = (os.path.join(path, cmd) for path in
-                         os.environ["PATH"].split(os.pathsep))
-
-            return any(
-                os.access(path, os.X_OK) and os.path.isfile(path)
-                for path in all_paths
-            )
-
         if which("bsub"):
             tags.append("lsf")
         elif which("salloc"):
