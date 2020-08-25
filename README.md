@@ -6,16 +6,6 @@ This script is meant to be run as part of the `ExecStartPre` script in the
 `systemd` service file for Gitlab runners. The net effect is that
 restarting a runner will reconcile any authentication issues.
 
-### Stateful
-
-When this script runs, it will look for a `runner-data.json` file and register
-a new runner for every key in that file. If `runner-data.json` does not exist,
-the script will try registering a shell and batch runner by default.
-
-Subsequent script runs will check the validity of the existing tokens in
-said json file and update them by deleting the current runner and
-re-registering them.
-
 ### Stateless
 
 If running with the `--stateless` flag, this script will _not_ write a

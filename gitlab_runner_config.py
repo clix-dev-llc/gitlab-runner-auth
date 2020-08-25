@@ -186,7 +186,7 @@ def update_runner_config(config_template, config_file, internal_config):
         ch.write(config)
 
 
-def configure_runner(prefix, api_url, stateless=False):
+def configure_runner(prefix, api_url):
     """Takes a config template and substitutes runner tokens"""
 
     runner_config = {}
@@ -200,90 +200,37 @@ def configure_runner(prefix, api_url, stateless=False):
     with open(os.path.join(prefix, "admin-token")) as fh:
         admin_token = fh.read()
 
-    if stateless:
-        with open(config_template) as fh:
-            template = fh.read()
-        try:
-            with open(os.path.join(prefix, "access-token")) as fh:
-                access_token = fh.read()
-        except FileNotFoundError:
-            print("A personal access token is required for stateless mode")
-            sys.exit(1)
-        filters = {
-            "scope": "shared",
-            "tag_list": ','.join([socket.gethostname()])
-        }
-        runner_types = set(token[1] for token in Formatter().parse(template)
-                           if token[1] != "hostname" and token[1] is not None)
-        runners = [runner_info(api_url, access_token, r["id"]) for r
-                   in list_runners(api_url, access_token, filters=filters)]
-        gitlab_tags = set(tag for r in runners for tag in r["tag_list"])
-        if len(runner_types & gitlab_tags) == 0:
-            # no config template tags in common with Gitlab, register runners
-            # for all the tags pulled from the template.
-            for runner_type in iter(runner_types):
-                runner_config[runner_type] = register_runner(
-                    api_url,
-                    admin_token,
-                    runner_type,
-                    generate_tags(runner_type=runner_type)
-                )
-        else:
-            for runner in runners:
-                try:
-                    runner_type = (runner_types
-                                   & set(runner["tag_list"])).pop()
-                    runner_config[runner_type] = runner
-                except KeyError:
-                    # we may have picked up a runner which doesn't match our
-                    # host, skip it
-                    pass
-    else:
-        try:
-            # ensure tokens are still valid, otherwise, delete the runner and
-            # register it again
-            data_file = os.path.join(prefix, "runner-data.json")
-            with open(data_file, "r") as fh:
-                changed = False
-                runner_config = json.load(fh)
-                for runner_type, data in runner_config.items():
-                    data = data or {}
-                    token = data.get("token", "")
-                    if not token or not valid_runner_token(api_url, token):
-                        # no refresh endpoint...delete and re-register
-                        if token:
-                            delete_runner(api_url, token)
-                        runner_config[runner_type] = register_runner(
-                            api_url,
-                            admin_token,
-                            runner_type,
-                            runner_type=runner_type
-                        )
-                        changed = True
-                if changed:
-                    with open(data_file, "w") as fh:
-                        fh.write(
-                            json.dumps(runner_config, sort_keys=True, indent=4)
-                        )
-        except FileNotFoundError:
-            # defaults to creating both a shell and batch runner
-            runner_config = {t: register_runner(
-                                    api_url,
-                                    admin_token,
-                                    t,
-                                    generate_tags(runner_type=t)
-                                )
-                             for t in ["shell", "batch"]}
-            with open(data_file, "w") as fh:
-                fh.write(
-                    json.dumps(runner_config, sort_keys=True, indent=4)
-                )
-
-    update_runner_config(
-        config_template,
-        config_file,
-        runner_config
+    with open(config_template) as fh:
+        template = fh.read()
+    try:
+        with open(os.path.join(prefix, "access-token")) as fh:
+            access_token = fh.read()
+    except FileNotFoundError:
+        print("A personal access token is required for stateless mode")
+        sys.exit(1)
+    filters = {"scope": "shared", "tag_list": ",".join([socket.gethostname()])}
+    runner_types = set(
+        token[1]
+        for token in Formatter().parse(template)
+        if token[1] != "hostname" and token[1] is not None
     )
+    runners = [
+        runner_info(api_url, access_token, r["id"])
+        for r in list_runners(api_url, access_token, filters=filters)
+    ]
+    gitlab_tags = set(tag for r in runners for tag in r["tag_list"])
+    if len(runner_types & gitlab_tags) == 0:
+        # no config template tags in common with Gitlab, register runners
+        # for all the tags pulled from the template.
+        for runner_type in iter(runner_types):
+            runner_config[runner_type] = register_runner(
+                api_url,
+                admin_token,
+                runner_type,
+                generate_tags(runner_type=runner_type),
+            )
+
+    update_runner_config(config_template, config_file, runner_config)
 
 
 if __name__ == '__main__':
