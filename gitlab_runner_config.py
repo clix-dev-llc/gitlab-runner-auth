@@ -188,7 +188,7 @@ def update_runner_config(config_template, config_file, internal_config):
         ch.write(config)
 
 
-def configure_runner(prefix, api_url):
+def configure_runner(prefix):
     """Takes a config template and substitutes runner tokens"""
 
     runner_config = {}
@@ -243,8 +243,5 @@ if __name__ == "__main__":
         default="/etc/gitlab-runner",
         help="""The runner config directory prefix""",
     )
-    parser.add_argument(
-        "--api-url", default="http://localhost:8080/api/v4", help="""Gitlab API URL"""
-    )
     args = parser.parse_args()
-    configure_runner(args.prefix, args.api_url, stateless=args.stateless)
+    configure_runner(args.prefix)
