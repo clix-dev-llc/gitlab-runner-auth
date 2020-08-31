@@ -13,45 +13,86 @@
 # SPDX-License-Identifier: MIT
 ###############################################################################
 
-import os
 import re
 import sys
 import socket
 import argparse
 import json
 import urllib.request
+from pathlib import Path
 from shutil import which
-from string import Formatter
 from urllib.request import Request
 from urllib.parse import urlencode, urljoin
 from urllib.error import HTTPError
 from json import JSONDecodeError
 
+LOGGER_NAME = "gitlab-runner-config"
+logging.basicConfig(format="%(asctime)s %(levelname)s: %(message)s", level=logging.INFO)
+logger = logging.getLogger(LOGGER_NAME)
 
-def generate_tags(runner_type=""):
-    """The set of tags for a host
 
-    Minimally, this is the system hostname, but should include things like OS,
-    architecture, GPU availability, etc.
+class TagMixin:
+    def tags(self):
+        return [self.identifier] + self._tags()
 
-    These tags are specified by runner configs and used by CI specs to run jobs
-    on the appropriate host.
-    """
 
-    # the hostname is _required_ to make this script work, everything else
-    # is extra (as far as this script is concerned)
-    hostname = socket.gethostname()
+class Executor(TagMixin):
+    @classmethod
+    def from_template(cls, template_file):
+        with open(template_file) as fh:
+            config = toml.load(fh)
+        return cls(config["executor"], template_file)
 
-    # also tag with the generic cluster name by removing any trailing numbers
-    tags = [hostname, re.sub(r"\d", "", hostname)]
-    if runner_type == "batch":
-        if which("bsub"):
-            tags.append("lsf")
-        elif which("salloc"):
-            tags.append("slurm")
-        elif which("cqsub"):
-            tags.append("cobalt")
-    return tags
+    def __init__(self, executor_type, template_file):
+        self.host = socket.gethostname()
+        self.executor_type = executor_type
+        self.template_file = template_file
+
+    @property
+    def identifier(self):
+        return "{}-{}".format(self.host, self.executor_type)
+
+    @property
+    def config(self):
+        pass
+
+    def _tags(self):
+        tags = []
+        if self.executor_type == "batch":
+            if which("bsub"):
+                tags.append("lsf")
+            elif which("salloc"):
+                tags.append("slurm")
+            elif which("cqsub"):
+                tags.append("cobalt")
+        return tags
+
+
+class Runner(TagMixin):
+    def __init__(self, executors, service="main"):
+        self.host = socket.gethostname()
+        self.executors = executors
+        self.service = service
+
+    @property
+    def identifier(self):
+        return "{}-{}".format(self.host, self.service)
+
+    def _tags(self):
+        # TODO add archspec cpu
+        cluster = re.sub(r"\d", "", self.host)
+        tags = [self.host, cluster]
+        for executor in self.executors:
+            tags += executor.tags()
+        return tags
+
+
+# TODO: GitLab client factory built from executor info?
+class GitlabInstance:
+    def __init__(self, url, admin_token, access_token):
+        self.url = url
+        self.admin_token = admin_token
+        self.access_token = access_token
 
 
 def list_runners(base_url, access_token, filters=None):
@@ -155,84 +196,30 @@ def delete_runner(base_url, runner_token):
         sys.exit(1)
 
 
-def update_runner_config(config_template, config_file, internal_config):
-    """Using data from config.json, write the config.toml used by the runner
-
-    Nominally, this method will provide a dictionary of keyword arguments to
-    format of the form:
-
-    {
-        "<runner_type>": "<runner_token>",
-        ...,
-    }
-
-    The config.toml must specify named template args like:
-
-    [[runners]]
-      token = "{runner_type}"
-      ...
-
-    and _not_ use positional arguments.
-    """
-
-    template_kwargs = {
-        "hostname": socket.gethostname(),
-    }
-    template_kwargs.update(
-        {runner: data["token"] for runner, data in internal_config.items()}
-    )
-
-    with open(config_template) as th, open(config_file, "w") as ch:
-        template = th.read()
-        config = template.format(**template_kwargs)
-        ch.write(config)
+def owner_only_permissions(path):
+    st = path.stat()
+    return not (bool(st.st_mode & stat.S_IRWXG) and bool(st.st_mode & stat.S_IRWXU))
 
 
-def configure_runner(prefix):
+def configure_runner(prefix, service_instance):
     """Takes a config template and substitutes runner tokens"""
 
     runner_config = {}
-    config_file = os.path.join(prefix, "config.toml")
-    config_template = os.path.join(prefix, "config.template")
+    config_file = prefix / Path("config.{}.toml".format(service_instance))
+    executor_template_dir = prefix / Path(service_instance)
 
-    # ensure trailing '/' for urljoin
-    if api_url[:-1] != "/":
-        api_url += "/"
-
-    with open(os.path.join(prefix, "admin-token")) as fh:
-        admin_token = fh.read()
-
-    with open(config_template) as fh:
-        template = fh.read()
-    try:
-        with open(os.path.join(prefix, "access-token")) as fh:
-            access_token = fh.read()
-    except FileNotFoundError:
-        print("A personal access token is required for stateless mode")
-        sys.exit(1)
-    filters = {"scope": "shared", "tag_list": ",".join([socket.gethostname()])}
-    runner_types = set(
-        token[1]
-        for token in Formatter().parse(template)
-        if token[1] != "hostname" and token[1] is not None
-    )
-    runners = [
-        runner_info(api_url, access_token, r["id"])
-        for r in list_runners(api_url, access_token, filters=filters)
-    ]
-    gitlab_tags = set(tag for r in runners for tag in r["tag_list"])
-    if len(runner_types & gitlab_tags) == 0:
-        # no config template tags in common with Gitlab, register runners
-        # for all the tags pulled from the template.
-        for runner_type in iter(runner_types):
-            runner_config[runner_type] = register_runner(
-                api_url,
-                admin_token,
-                runner_type,
-                generate_tags(runner_type=runner_type),
+    if not config_file.is_file():
+        if not all(owner_only_permissions(d) for d in [prefix, executor_template_dir]):
+            logger.error(
+                "check permissions on {prefix} or {template}, too permissive, exiting".format(
+                    prefix=prefix, template=executor_template_dir
+                )
             )
-
-    update_runner_config(config_template, config_file, runner_config)
+            sys.exit(1)
+        # delete all runners associated with this **specific** host and instance type
+        # build executors from the available templates
+        # build a runner from the available executors
+        # register each executor with GitLab and dump the runner config
 
 
 if __name__ == "__main__":
@@ -243,5 +230,10 @@ if __name__ == "__main__":
         default="/etc/gitlab-runner",
         help="""The runner config directory prefix""",
     )
+    parser.add_argument(
+        "--instance",
+        default="main",
+        help="""The instance being controlled by systemd""",
+    )
     args = parser.parse_args()
-    configure_runner(args.prefix)
+    configure_runner(args.prefix, args.service_instance)
